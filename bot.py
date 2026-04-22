@@ -23,7 +23,6 @@ FEEDS = [
     "https://www.reddit.com/r/seagulls.rss",
     "https://www.reddit.com/r/birding.rss",
     "https://www.reddit.com/r/wildlifephotography.rss",
-    "https://www.reddit.com/search.rss?q=seagull&sort=new",
     # Threads через RSSHub (замени USERNAME на нужный аккаунт):
     # "https://rsshub.app/threads/user/USERNAME",
 ]
@@ -46,14 +45,23 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SeagullBot/1.0; +https://t.me/)"}
+
 async def check_feeds(app: Application):
     seen = load_json(SEEN_FILE)
+    total_new = 0
 
     for feed_url in FEEDS:
         try:
-            feed = feedparser.parse(feed_url)
+            feed = feedparser.parse(feed_url, request_headers=HEADERS)
         except Exception as e:
             print(f"Ошибка парсинга {feed_url}: {e}")
+            await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка парсинга:\n{feed_url}\n{e}")
+            continue
+
+        print(f"Фид: {feed_url} — записей: {len(feed.entries)}")
+        if not feed.entries:
+            await app.bot.send_message(ADMIN_ID, f"⚠️ Фид пустой: {feed_url}")
             continue
 
         for entry in feed.entries[:5]:
