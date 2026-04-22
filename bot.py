@@ -19,14 +19,13 @@ QUEUE_FILE  = "queue.json"
 SEEN_FILE   = "seen.json"
 
 # ─── Источники контента ───────────────────────────────────────────────────────
-
+FEEDS = [
+    "https://www.reddit.com/search.json?q=seagull&sort=new&limit=10",
+    "https://www.reddit.com/search.json?q=seagull+photo&sort=new&limit=10",
     # Threads через RSSHub (замени USERNAME на нужный аккаунт):
     # "https://rsshub.app/threads/user/USERNAME",
-
-FEEDS = [
-    "https://www.reddit.com/search.rss?q=seagull&sort=new",
-    "https://www.reddit.com/search.rss?q=seagull+photo&sort=new",
 ]
+
 # ─── Время публикации (UTC, +3 = МСК) ────────────────────────────────────────
 # "9,15,21" = публикации в 12:00, 18:00, 00:00 МСК
 PUBLISH_HOURS = "9,15,21"
@@ -45,7 +44,7 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; SeagullBot/1.0; +https://t.me/)"}
+HEADERS = {"User-Agent": "SeagullBot/1.0 by u/seagullbot (telegram channel aggregator)"}
 
 async def check_feeds(app: Application):
     seen = load_json(SEEN_FILE)
@@ -53,37 +52,46 @@ async def check_feeds(app: Application):
 
     for feed_url in FEEDS:
         try:
-            feed = feedparser.parse(feed_url, request_headers=HEADERS)
+            import aiohttp
+            json_url = feed_url  # уже JSON URL
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
+                async with session.get(json_url, allow_redirects=True) as resp:
+                    data = await resp.json()
+            posts = data.get("data", {}).get("children", [])
         except Exception as e:
-            print(f"Ошибка парсинга {feed_url}: {e}")
-            await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка парсинга:\n{feed_url}\n{e}")
+            print(f"Ошибка запроса {feed_url}: {e}")
+            await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка запроса:\n{e}")
             continue
 
-        print(f"Фид: {feed_url} — записей: {len(feed.entries)}")
-        if not feed.entries:
+        print(f"Фид: {feed_url} — записей: {len(posts)}")
+        if not posts:
             await app.bot.send_message(ADMIN_ID, f"⚠️ Фид пустой: {feed_url}")
             continue
 
-        for entry in feed.entries[:5]:
-            entry_id = getattr(entry, "id", entry.get("link", ""))
+        for child in posts[:5]:
+            entry     = child.get("data", {})
+            entry_id  = entry.get("id", "")
             if entry_id in seen:
                 continue
 
             seen.append(entry_id)
             save_json(SEEN_FILE, seen[-500:])
 
+            # Картинка: берём preview если есть
             media_url = None
-            if hasattr(entry, "media_thumbnail"):
-                media_url = entry.media_thumbnail[0].get("url")
-            elif hasattr(entry, "links"):
-                for link in entry.links:
-                    if link.get("type", "").startswith("image"):
-                        media_url = link.get("href")
-                        break
+            preview   = entry.get("preview", {})
+            images    = preview.get("images", [])
+            if images:
+                media_url = images[0].get("source", {}).get("url", "").replace("&amp;", "&")
+            # Если нет preview, пробуем thumbnail
+            if not media_url:
+                thumb = entry.get("thumbnail", "")
+                if thumb and thumb.startswith("http"):
+                    media_url = thumb
 
             title     = (entry.get("title") or "")[:120]
-            post_link = entry.get("link", "")
-            source    = feed.feed.get("title", feed_url)
+            post_link = f"https://reddit.com{entry.get('permalink', '')}"
+            source    = entry.get("subreddit_name_prefixed", feed_url)
 
             caption = (
                 f"🐦 <b>{source}</b>\n"
