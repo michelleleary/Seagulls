@@ -1,0 +1,4 @@
+python-telegram-bot==20.7
+feedparser==6.0.10
+aiohttp==3.9.1
+apscheduler==3.10.4
