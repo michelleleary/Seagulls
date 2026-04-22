@@ -1,6 +1,6 @@
 import os
 import json
-import praw
+import feedparser
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -18,25 +18,20 @@ CHANNEL_ID = os.environ["CHANNEL_ID"]  # например: @seagullschannel
 QUEUE_FILE = "queue.json"
 SEEN_FILE = "seen.json"
 
-# ─── Reddit API ───────────────────────────────────────────────────────────────
+# ─── RSS-фиды Reddit (без API, без ключей) ───────────────────────────────────
 
-reddit = praw.Reddit(
-    client_id=os.environ["REDDIT_CLIENT_ID"],
-    client_secret=os.environ["REDDIT_CLIENT_SECRET"],
-    user_agent="SeagullBot/1.0 by u/seagullbot (telegram channel aggregator)"
-)
-
-# ─── Поисковые запросы Reddit ─────────────────────────────────────────────────
-
-REDDIT_QUERIES = [
-    "seagull",
-    "gull",
+FEEDS = [
+    "https://www.reddit.com/search.rss?q=seagull&sort=new&limit=10",
+    "https://www.reddit.com/search.rss?q=seagull+photo&sort=new&limit=10",
+    "https://www.reddit.com/r/whatsthisbird/search.rss?q=seagull&sort=new&limit=10",
 ]
 
 # ─── Время публикации (UTC, +3 = МСК) ────────────────────────────────────────
 # "9,15,21" = публикации в 12:00, 18:00, 00:00 МСК
 
 PUBLISH_HOURS = "9,15,21"
+
+HEADERS = {"User-Agent": "SeagullBot/1.0 (telegram channel aggregator)"}
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -56,55 +51,61 @@ async def check_feeds(app: Application):
     seen = load_json(SEEN_FILE)
     total_new = 0
 
-    for query in REDDIT_QUERIES:
+    for feed_url in FEEDS:
         try:
-            results = list(reddit.subreddit("all").search(query, sort="new", limit=10))
+            feed = feedparser.parse(feed_url, request_headers=HEADERS)
+            entries = feed.entries
         except Exception as e:
-            print(f"Ошибка Reddit API ({query}): {e}")
-            await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка Reddit API:\n{e}")
+            print(f"Ошибка фида {feed_url}: {e}")
+            await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка фида:\n{e}")
             continue
 
-        print(f"Запрос: '{query}' — найдено: {len(results)}")
+        print(f"Фид: {feed_url} — записей: {len(entries)}")
 
-        for post in results[:5]:
-            entry_id = post.id
+        for entry in entries[:5]:
+            entry_id = entry.get("id", entry.get("link", ""))
             if entry_id in seen:
                 continue
 
             seen.append(entry_id)
             save_json(SEEN_FILE, seen[-500:])
 
-            # Картинка
-            media_url = None
-            if hasattr(post, "preview") and post.preview:
-                try:
-                    media_url = post.preview["images"][0]["source"]["url"].replace("&amp;", "&")
-                except Exception:
-                    pass
-            if not media_url and hasattr(post, "url"):
-                url = post.url
-                if any(url.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]):
-                    media_url = url
+            title = (entry.get("title") or "")[:120]
+            post_link = entry.get("link", "")
 
-            title = (post.title or "")[:120]
-            post_link = f"https://reddit.com{post.permalink}"
-            source = f"r/{post.subreddit}"
+            # Пробуем вытащить картинку из содержимого поста
+            media_url = None
+            content = entry.get("summary", "") or ""
+            if content:
+                import re
+                img_match = re.search(r'https?://[^\s"\'<>]+\.(?:jpg|jpeg|png|gif|webp)', content)
+                if img_match:
+                    media_url = img_match.group(0)
+
+            # Определяем subreddit из ссылки
+            subreddit = "Reddit"
+            if "/r/" in post_link:
+                parts = post_link.split("/r/")
+                if len(parts) > 1:
+                    subreddit = "r/" + parts[1].split("/")[0]
 
             caption = (
-                f"🐦 <b>{source}</b>\n"
+                f"🐦 <b>{subreddit}</b>\n"
                 f"{title}\n\n"
                 f'<a href="{post_link}">👉 Открыть оригинал</a>\n\n'
                 f"<i>Напиши описание и нажми ✅, или пропусти.</i>"
             )
 
+            short_id = entry_id[-60:] if len(entry_id) > 60 else entry_id
+
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "✅ В очередь",
-                    callback_data=f"queue|{entry_id[:60]}|{post_link}|{media_url or ''}"
+                    callback_data=f"queue|{short_id}|{post_link}|{media_url or ''}"
                 ),
                 InlineKeyboardButton(
                     "❌ Пропустить",
-                    callback_data=f"skip|{entry_id[:60]}"
+                    callback_data=f"skip|{short_id}"
                 ),
             ]])
 
@@ -137,6 +138,8 @@ async def check_feeds(app: Application):
 
     if total_new == 0:
         await app.bot.send_message(ADMIN_ID, "ℹ️ Новых постов не найдено.")
+    else:
+        await app.bot.send_message(ADMIN_ID, f"✅ Найдено новых постов: {total_new}")
 
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -232,7 +235,7 @@ async def publish_next(app: Application):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐦 <b>Seagull Bot запущен!</b>\n\n"
-        "Я буду присылать тебе посты из Reddit.\n"
+        "Я буду присылать тебе посты из Reddit каждые 2 часа.\n"
         "Нажимай ✅ под понравившимися, пиши описание — пост встанет в очередь.\n\n"
         "/status — посмотреть очередь\n"
         "/check — проверить прямо сейчас\n"
@@ -261,7 +264,6 @@ async def cmd_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text("🔍 Проверяю фиды…")
     await check_feeds(ctx.application)
-    await update.message.reply_text("✅ Готово!")
 
 
 async def cmd_publish(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
