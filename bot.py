@@ -8,8 +8,9 @@ from telegram.ext import (
     MessageHandler, filters, ContextTypes
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import asyncio
 
-# ─── Настройки (берутся из переменных окружения Railway) ───────────────────────
+# ─── Настройки ────────────────────────────────────────────────────────────────
 BOT_TOKEN   = os.environ["BOT_TOKEN"]
 ADMIN_ID    = int(os.environ["ADMIN_CHAT_ID"])
 CHANNEL_ID  = os.environ["CHANNEL_ID"]   # например: @seagullschannel
@@ -17,20 +18,17 @@ CHANNEL_ID  = os.environ["CHANNEL_ID"]   # например: @seagullschannel
 QUEUE_FILE  = "queue.json"
 SEEN_FILE   = "seen.json"
 
-# ─── Источники контента ────────────────────────────────────────────────────────
-# Добавляй/убирай ссылки по желанию
+# ─── Источники контента ───────────────────────────────────────────────────────
 FEEDS = [
-    # Reddit — сабреддиты про чаек и птиц
     "https://www.reddit.com/r/seagulls.rss",
     "https://www.reddit.com/r/birding.rss",
     "https://www.reddit.com/r/wildlifephotography.rss",
-
-    # Threads через RSSHub (замени USERNAME на нужный аккаунт)
+    # Threads через RSSHub (замени USERNAME на нужный аккаунт):
     # "https://rsshub.app/threads/user/USERNAME",
 ]
 
-# ─── Время публикации в канал (час по UTC, +3 для Москвы) ─────────────────────
-# Сейчас: 9:00, 15:00, 21:00 UTC (= 12, 18, 00 МСК)
+# ─── Время публикации (UTC, +3 = МСК) ────────────────────────────────────────
+# "9,15,21" = публикации в 12:00, 18:00, 00:00 МСК
 PUBLISH_HOURS = "9,15,21"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -47,7 +45,6 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# ─── Проверка фидов ────────────────────────────────────────────────────────────
 async def check_feeds(app: Application):
     seen = load_json(SEEN_FILE)
 
@@ -64,9 +61,8 @@ async def check_feeds(app: Application):
                 continue
 
             seen.append(entry_id)
-            save_json(SEEN_FILE, seen[-500:])  # храним последние 500 ID
+            save_json(SEEN_FILE, seen[-500:])
 
-            # Ищем превью-картинку
             media_url = None
             if hasattr(entry, "media_thumbnail"):
                 media_url = entry.media_thumbnail[0].get("url")
@@ -76,9 +72,9 @@ async def check_feeds(app: Application):
                         media_url = link.get("href")
                         break
 
-            title   = (entry.get("title") or "")[:120]
+            title     = (entry.get("title") or "")[:120]
             post_link = entry.get("link", "")
-            source  = feed.feed.get("title", feed_url)
+            source    = feed.feed.get("title", feed_url)
 
             caption = (
                 f"🐦 <b>{source}</b>\n"
@@ -113,7 +109,6 @@ async def check_feeds(app: Application):
                     )
             except Exception as e:
                 print(f"Ошибка отправки карточки: {e}")
-                # Пробуем без картинки
                 try:
                     await app.bot.send_message(
                         ADMIN_ID, caption,
@@ -124,7 +119,6 @@ async def check_feeds(app: Application):
                     print(f"Ошибка запасной отправки: {e2}")
 
 
-# ─── Обработка кнопок ──────────────────────────────────────────────────────────
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -134,18 +128,17 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "skip":
         text = "❌ Пропущено"
-        if query.message.photo:
-            await query.edit_message_caption(text)
-        else:
-            await query.edit_message_text(text)
+        try:
+            if query.message.photo:
+                await query.edit_message_caption(text)
+            else:
+                await query.edit_message_text(text)
+        except Exception:
+            pass
 
     elif action == "queue":
         _, post_id, link, media = parts
-        ctx.user_data["pending"] = {
-            "id":    post_id,
-            "link":  link,
-            "media": media,
-        }
+        ctx.user_data["pending"] = {"id": post_id, "link": link, "media": media}
         prompt = (
             f"✏️ <b>Напиши описание для этого поста</b> — отправь следующим сообщением.\n"
             f'<a href="{link}">Оригинал</a>'
@@ -159,7 +152,6 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ─── Приём описания от администратора ─────────────────────────────────────────
 async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -167,7 +159,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     pending = ctx.user_data.get("pending")
     if not pending:
         await update.message.reply_text(
-            "ℹ️ Нажми ✅ под карточкой поста, а потом пиши описание."
+            "ℹ️ Нажми ✅ под карточкой поста, потом пиши описание."
         )
         return
 
@@ -187,7 +179,6 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ─── Публикация следующего поста из очереди ───────────────────────────────────
 async def publish_next(app: Application):
     queue = load_json(QUEUE_FILE)
     if not queue:
@@ -219,12 +210,11 @@ async def publish_next(app: Application):
         await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка публикации: {e}")
 
 
-# ─── Команды ──────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐦 <b>Seagull Bot запущен!</b>\n\n"
         "Я буду присылать тебе посты из Reddit и Threads.\n"
-        "Нажимай ✅ под понравившимися, пиши описание — и пост встанет в очередь.\n\n"
+        "Нажимай ✅ под понравившимися, пиши описание — пост встанет в очередь.\n\n"
         "/status — посмотреть очередь\n"
         "/check — проверить фиды прямо сейчас\n"
         "/publish — опубликовать следующий пост вручную",
@@ -258,7 +248,6 @@ async def cmd_publish(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await publish_next(ctx.application)
 
 
-# ─── Запуск ───────────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
@@ -270,8 +259,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_feeds,   "interval", hours=2,       args=[app])
-    scheduler.add_job(publish_next,  "cron",     hour=PUBLISH_HOURS, args=[app])
+    scheduler.add_job(check_feeds,  "interval", hours=2,            args=[app])
+    scheduler.add_job(publish_next, "cron",     hour=PUBLISH_HOURS, args=[app])
     scheduler.start()
 
     print("🐦 Seagull Bot запущен!")
