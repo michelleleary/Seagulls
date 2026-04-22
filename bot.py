@@ -19,14 +19,14 @@ QUEUE_FILE  = "queue.json"
 SEEN_FILE   = "seen.json"
 
 # ─── Источники контента ───────────────────────────────────────────────────────
-FEEDS = [
-    "https://www.reddit.com/r/seagulls.rss",
-    "https://www.reddit.com/r/birding.rss",
-    "https://www.reddit.com/r/wildlifephotography.rss",
+
     # Threads через RSSHub (замени USERNAME на нужный аккаунт):
     # "https://rsshub.app/threads/user/USERNAME",
-]
 
+FEEDS = [
+    "https://www.reddit.com/search.rss?q=seagull&sort=new",
+    "https://www.reddit.com/search.rss?q=seagull+photo&sort=new",
+]
 # ─── Время публикации (UTC, +3 = МСК) ────────────────────────────────────────
 # "9,15,21" = публикации в 12:00, 18:00, 00:00 МСК
 PUBLISH_HOURS = "9,15,21"
