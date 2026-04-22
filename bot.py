@@ -23,6 +23,7 @@ FEEDS = [
     "https://www.reddit.com/r/seagulls.rss",
     "https://www.reddit.com/r/birding.rss",
     "https://www.reddit.com/r/wildlifephotography.rss",
+    "https://www.reddit.com/search.rss?q=seagull&sort=new",
     # Threads через RSSHub (замени USERNAME на нужный аккаунт):
     # "https://rsshub.app/threads/user/USERNAME",
 ]
