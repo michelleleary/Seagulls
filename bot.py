@@ -114,12 +114,8 @@ async def check_feeds(app: Application):
             ]])
 
             try:
-                if media_url:
-                    await app.bot.send_photo(
-                        ADMIN_ID, media_url,
-                        caption=caption, parse_mode="HTML",
-                        reply_markup=keyboard
-                    )
+                if False:  # картинки временно отключены
+                    pass
                 else:
                     await app.bot.send_message(
                         ADMIN_ID, caption,
