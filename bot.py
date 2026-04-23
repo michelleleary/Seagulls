@@ -23,7 +23,8 @@ SEEN_IDS = set()
 POST_STORE = {}
 POST_COUNTER = 0
 
-PUBLISH_HOURS = "5,6,7,8,9,10,11,12,13,13,14,15,16,17,18,19"
+# Публикация каждый час с 8 до 22 МСК (UTC+3 = 5-19 UTC)
+PUBLISH_HOURS = "5,6,7,8,9,10,11,12,13,14,15,16,17,18,19"
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -43,11 +44,9 @@ def save_json(path, data):
 
 
 async def fetch_unsplash():
-    """Фото чаек с Unsplash."""
     results = []
     queries = ["seagull", "seagull flying", "seagull beach"]
     headers = {"Authorization": f"Client-ID {UNSPLASH_KEY}"}
-
     async with aiohttp.ClientSession() as session:
         for query in queries:
             try:
@@ -75,11 +74,9 @@ async def fetch_unsplash():
 
 
 async def fetch_pexels():
-    """Фото чаек с Pexels."""
     results = []
     queries = ["seagull", "gull bird"]
     headers = {"Authorization": PEXELS_KEY}
-
     async with aiohttp.ClientSession() as session:
         for query in queries:
             try:
@@ -107,14 +104,13 @@ async def fetch_pexels():
 
 
 async def fetch_inaturalist():
-    """Наблюдения чаек с iNaturalist."""
     results = []
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
                 "https://api.inaturalist.org/v1/observations",
                 params={
-                    "taxon_name": "Larus",  # научное название чаек
+                    "taxon_name": "Larus",
                     "has[]": "photos",
                     "per_page": 10,
                     "order": "desc",
@@ -131,14 +127,11 @@ async def fetch_inaturalist():
                         img_url = photos[0].get("url", "").replace("square", "large")
                         if not img_url:
                             continue
-
                         taxon = obs.get("taxon", {})
                         species = taxon.get("preferred_common_name") or taxon.get("name") or "Seagull"
                         place = obs.get("place_guess") or "unknown location"
                         user = obs.get("user", {}).get("login", "unknown")
                         obs_id = str(obs.get("id", ""))
-                        obs_link = f"https://www.inaturalist.org/observations/{obs_id}"
-
                         results.append({
                             "id": "inat_" + obs_id,
                             "source": "iNaturalist",
@@ -147,7 +140,7 @@ async def fetch_inaturalist():
                             "author_link": f"https://www.inaturalist.org/people/{user}",
                             "media": img_url,
                             "media_type": "photo",
-                            "link": obs_link,
+                            "link": f"https://www.inaturalist.org/observations/{obs_id}",
                         })
     except Exception as e:
         print(f"Ошибка iNaturalist: {e}")
@@ -158,7 +151,6 @@ async def check_feeds(app: Application):
     global SEEN_IDS, POST_STORE, POST_COUNTER
     total_new = 0
 
-    # Собираем из всех источников
     all_posts = []
     all_posts += await fetch_unsplash()
     all_posts += await fetch_pexels()
@@ -211,6 +203,33 @@ async def check_feeds(app: Application):
         await app.bot.send_message(ADMIN_ID, "ℹ️ Новых фото не найдено.")
     else:
         await app.bot.send_message(ADMIN_ID, f"✅ Отправлено карточек: {total_new}")
+
+
+async def publish_next(app: Application):
+    queue = load_json(QUEUE_FILE)
+    if not queue:
+        return  # молча пропускаем если очередь пуста
+
+    post = queue.pop(0)
+    save_json(QUEUE_FILE, queue)
+
+    caption = post["caption"]
+    if post.get("link"):
+        caption += f'\n\n<a href="{post["link"]}">Источник фото</a>'
+
+    try:
+        if post.get("media"):
+            await app.bot.send_photo(CHANNEL_ID, post["media"], caption=caption, parse_mode="HTML")
+        else:
+            await app.bot.send_message(CHANNEL_ID, caption, parse_mode="HTML", disable_web_page_preview=True)
+
+        await app.bot.send_message(
+            ADMIN_ID,
+            f"📤 Опубликовано!\n📋 Осталось в очереди: <b>{len(queue)}</b>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка публикации: {e}")
 
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -269,40 +288,12 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def publish_next(app: Application):
-    queue = load_json(QUEUE_FILE)
-    if not queue:
-        if not queue:
-        return
-
-    post = queue.pop(0)
-    save_json(QUEUE_FILE, queue)
-
-    caption = post["caption"]
-    if post.get("link"):
-        caption += f'\n\n<a href="{post["link"]}">Источник фото</a>'
-
-    try:
-        if post.get("media"):
-            await app.bot.send_photo(CHANNEL_ID, post["media"], caption=caption, parse_mode="HTML")
-        else:
-            await app.bot.send_message(CHANNEL_ID, caption, parse_mode="HTML", disable_web_page_preview=True)
-
-        await app.bot.send_message(
-            ADMIN_ID,
-            f"📤 Опубликовано!\n📋 Осталось в очереди: <b>{len(queue)}</b>",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка публикации: {e}")
-
-
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐦 <b>Seagull Bot запущен!</b>\n\n"
         "Каждые 2 часа я буду присылать фото чаек из Unsplash, Pexels и iNaturalist.\n"
         "Нажимай ✅, пиши описание — фото уйдёт в очередь.\n"
-        "В 12:00, 18:00 и 00:00 МСК бот публикует сам.\n\n"
+        "Публикации каждый час с 8:00 до 22:00 МСК.\n\n"
         "/check — проверить сейчас\n"
         "/status — очередь\n"
         "/publish — опубликовать вручную",
@@ -349,7 +340,9 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     scheduler = AsyncIOScheduler()
+    # Проверка новых фото каждые 2 часа
     scheduler.add_job(check_feeds, "interval", hours=2, args=[app], start_date="2099-01-01")
+    # Публикация каждый час с 8 до 22 МСК (5-19 UTC)
     scheduler.add_job(publish_next, "cron", hour=PUBLISH_HOURS, minute=0, args=[app])
     scheduler.start()
 
