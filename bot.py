@@ -361,6 +361,11 @@ async def cmd_publish(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await publish_next(ctx.application)
 
+async def cmd_clearqueue(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    save_json(QUEUE_FILE, [])
+    await update.message.reply_text("🗑️ Очередь очищена!")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -369,6 +374,7 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CommandHandler("publish", cmd_publish))
+    app.add_handler(CommandHandler("clearqueue", cmd_clearqueue))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
