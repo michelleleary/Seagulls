@@ -25,8 +25,7 @@ POST_COUNTER = 0
 # ─── Фиды ─────────────────────────────────────────────────────────────────────
 
 FEEDS = [
-    "https://old.reddit.com/r/seagulls/new.rss",
-    "https://old.reddit.com/r/birding/search.rss?q=seagull&sort=new",
+    "https://www.reddit.com/search/?q=seagull&type=posts&sort=new.rss",
 ]
 
 PUBLISH_HOURS = "9,15,21"
