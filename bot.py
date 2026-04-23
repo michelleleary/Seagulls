@@ -21,7 +21,7 @@ SEEN_FILE = "seen.json"
 # ─── RSS-фиды Reddit (без API, без ключей) ───────────────────────────────────
 
 FEEDS = [
-https://feeds.bbci.co.uk/news/rss.xml
+    "https://feeds.bbci.co.uk/news/rss.xml",
 ]
 
 # ─── Время публикации (UTC, +3 = МСК) ────────────────────────────────────────
