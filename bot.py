@@ -16,16 +16,12 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_CHAT_ID"])
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 UNSPLASH_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
+PEXELS_KEY = os.environ["PEXELS_API_KEY"]
 
 QUEUE_FILE = "/tmp/queue.json"
-
 SEEN_IDS = set()
 POST_STORE = {}
 POST_COUNTER = 0
-
-# ─── Поисковые запросы Unsplash ───────────────────────────────────────────────
-
-QUERIES = ["seagull", "seagull flying", "seagull beach", "gull bird"]
 
 PUBLISH_HOURS = "9,15,21"
 
@@ -46,94 +42,170 @@ def save_json(path, data):
         print(f"Ошибка сохранения {path}: {e}")
 
 
-async def fetch_unsplash(query: str, page: int = 1):
-    """Запрашиваем фото из Unsplash."""
-    url = "https://api.unsplash.com/search/photos"
-    params = {
-        "query": query,
-        "per_page": 10,
-        "page": page,
-        "order_by": "latest",
-    }
+async def fetch_unsplash():
+    """Фото чаек с Unsplash."""
+    results = []
+    queries = ["seagull", "seagull flying", "seagull beach"]
     headers = {"Authorization": f"Client-ID {UNSPLASH_KEY}"}
 
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params, headers=headers) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise Exception(f"Unsplash вернул {resp.status}: {text[:200]}")
-            data = await resp.json()
-            return data.get("results", [])
+        for query in queries:
+            try:
+                async with session.get(
+                    "https://api.unsplash.com/search/photos",
+                    params={"query": query, "per_page": 5, "order_by": "latest"},
+                    headers=headers
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for photo in data.get("results", []):
+                            results.append({
+                                "id": "unsplash_" + photo["id"],
+                                "source": "Unsplash",
+                                "title": photo.get("description") or photo.get("alt_description") or query,
+                                "author": photo.get("user", {}).get("name", "unknown"),
+                                "author_link": photo.get("user", {}).get("links", {}).get("html", ""),
+                                "media": photo.get("urls", {}).get("regular", ""),
+                                "media_type": "photo",
+                                "link": photo.get("links", {}).get("html", ""),
+                            })
+            except Exception as e:
+                print(f"Ошибка Unsplash ({query}): {e}")
+    return results
+
+
+async def fetch_pexels():
+    """Фото чаек с Pexels."""
+    results = []
+    queries = ["seagull", "gull bird"]
+    headers = {"Authorization": PEXELS_KEY}
+
+    async with aiohttp.ClientSession() as session:
+        for query in queries:
+            try:
+                async with session.get(
+                    "https://api.pexels.com/v1/search",
+                    params={"query": query, "per_page": 5},
+                    headers=headers
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for photo in data.get("photos", []):
+                            results.append({
+                                "id": "pexels_" + str(photo["id"]),
+                                "source": "Pexels",
+                                "title": photo.get("alt", query),
+                                "author": photo.get("photographer", "unknown"),
+                                "author_link": photo.get("photographer_url", ""),
+                                "media": photo.get("src", {}).get("large", ""),
+                                "media_type": "photo",
+                                "link": photo.get("url", ""),
+                            })
+            except Exception as e:
+                print(f"Ошибка Pexels ({query}): {e}")
+    return results
+
+
+async def fetch_inaturalist():
+    """Наблюдения чаек с iNaturalist."""
+    results = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.inaturalist.org/v1/observations",
+                params={
+                    "taxon_name": "Larus",  # научное название чаек
+                    "has[]": "photos",
+                    "per_page": 10,
+                    "order": "desc",
+                    "order_by": "created_at",
+                    "quality_grade": "research",
+                }
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    for obs in data.get("results", []):
+                        photos = obs.get("photos", [])
+                        if not photos:
+                            continue
+                        img_url = photos[0].get("url", "").replace("square", "large")
+                        if not img_url:
+                            continue
+
+                        taxon = obs.get("taxon", {})
+                        species = taxon.get("preferred_common_name") or taxon.get("name") or "Seagull"
+                        place = obs.get("place_guess") or "unknown location"
+                        user = obs.get("user", {}).get("login", "unknown")
+                        obs_id = str(obs.get("id", ""))
+                        obs_link = f"https://www.inaturalist.org/observations/{obs_id}"
+
+                        results.append({
+                            "id": "inat_" + obs_id,
+                            "source": "iNaturalist",
+                            "title": f"{species} — {place}",
+                            "author": user,
+                            "author_link": f"https://www.inaturalist.org/people/{user}",
+                            "media": img_url,
+                            "media_type": "photo",
+                            "link": obs_link,
+                        })
+    except Exception as e:
+        print(f"Ошибка iNaturalist: {e}")
+    return results
 
 
 async def check_feeds(app: Application):
     global SEEN_IDS, POST_STORE, POST_COUNTER
     total_new = 0
 
-    for query in QUERIES:
-        try:
-            photos = await fetch_unsplash(query)
-        except Exception as e:
-            await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка Unsplash ({query}):\n{e}")
+    # Собираем из всех источников
+    all_posts = []
+    all_posts += await fetch_unsplash()
+    all_posts += await fetch_pexels()
+    all_posts += await fetch_inaturalist()
+
+    for post in all_posts:
+        post_id = post["id"]
+        if post_id in SEEN_IDS:
             continue
+        SEEN_IDS.add(post_id)
 
-        for photo in photos:
-            photo_id = photo.get("id", "")
-            if photo_id in SEEN_IDS:
-                continue
-            SEEN_IDS.add(photo_id)
+        POST_COUNTER += 1
+        post_key = str(POST_COUNTER)
+        POST_STORE[post_key] = post
 
-            # Данные фото
-            img_url = photo.get("urls", {}).get("regular", "")
-            author = photo.get("user", {}).get("name", "unknown")
-            author_link = photo.get("user", {}).get("links", {}).get("html", "")
-            description = photo.get("description") or photo.get("alt_description") or "seagull"
-            photo_link = photo.get("links", {}).get("html", "")
+        caption = (
+            f"🐦 <b>{post['source']}</b>\n"
+            f"📝 {post['title'][:150]}\n"
+            f'👤 <a href="{post["author_link"]}">{post["author"]}</a>\n\n'
+            f'<a href="{post["link"]}">👉 Оригинал</a>'
+        )
 
-            # Сохраняем в хранилище
-            POST_COUNTER += 1
-            post_key = str(POST_COUNTER)
-            POST_STORE[post_key] = {
-                "link": photo_link,
-                "media": img_url,
-                "media_type": "photo",
-                "author": author,
-            }
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ В очередь", callback_data=f"q|{post_key}"),
+            InlineKeyboardButton("❌ Пропустить", callback_data=f"s|{post_key}"),
+        ]])
 
-            caption = (
-                f"🐦 <b>Unsplash — {query}</b>\n"
-                f"📝 {description[:150]}\n"
-                f'👤 <a href="{author_link}">{author}</a>\n\n'
-                f'<a href="{photo_link}">👉 Оригинал</a>'
+        try:
+            await app.bot.send_photo(
+                ADMIN_ID, post["media"],
+                caption=caption, parse_mode="HTML",
+                reply_markup=keyboard
             )
-
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ В очередь", callback_data=f"q|{post_key}"),
-                InlineKeyboardButton("❌ Пропустить", callback_data=f"s|{post_key}"),
-            ]])
-
+            total_new += 1
+        except Exception as e:
             try:
-                await app.bot.send_photo(
-                    ADMIN_ID, img_url,
-                    caption=caption, parse_mode="HTML",
-                    reply_markup=keyboard
+                await app.bot.send_message(
+                    ADMIN_ID, caption,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                    disable_web_page_preview=False
                 )
                 total_new += 1
-            except Exception as e:
-                print(f"Ошибка отправки фото: {e}")
-                try:
-                    await app.bot.send_message(
-                        ADMIN_ID, caption,
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
-                        disable_web_page_preview=False
-                    )
-                    total_new += 1
-                except Exception as e2:
-                    print(f"Ошибка запасной отправки: {e2}")
+            except Exception as e2:
+                print(f"Ошибка отправки: {e2}")
 
-            # Небольшая пауза чтобы не спамить
-            await asyncio.sleep(0.5)
+        await asyncio.sleep(0.5)
 
     if total_new == 0:
         await app.bot.send_message(ADMIN_ID, "ℹ️ Новых фото не найдено.")
@@ -161,7 +233,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         prompt = (
             f"✏️ <b>Напиши описание для публикации в канал</b>\n"
             f"Отправь следующим сообщением.\n\n"
-            f'<a href="{post.get("link", "")}">Оригинал на Unsplash</a>'
+            f'<a href="{post.get("link", "")}">Оригинал ({post.get("source", "")})</a>'
         )
         try:
             await query.edit_message_caption(prompt, parse_mode="HTML", reply_markup=None)
@@ -208,12 +280,11 @@ async def publish_next(app: Application):
 
     caption = post["caption"]
     if post.get("link"):
-        caption += f'\n\n<a href="{post["link"]}">Фото: Unsplash</a>'
+        caption += f'\n\n<a href="{post["link"]}">Источник фото</a>'
 
     try:
-        media = post.get("media", "")
-        if media:
-            await app.bot.send_photo(CHANNEL_ID, media, caption=caption, parse_mode="HTML")
+        if post.get("media"):
+            await app.bot.send_photo(CHANNEL_ID, post["media"], caption=caption, parse_mode="HTML")
         else:
             await app.bot.send_message(CHANNEL_ID, caption, parse_mode="HTML", disable_web_page_preview=True)
 
@@ -229,7 +300,7 @@ async def publish_next(app: Application):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐦 <b>Seagull Bot запущен!</b>\n\n"
-        "Каждые 2 часа я буду присылать фото чаек с Unsplash.\n"
+        "Каждые 2 часа я буду присылать фото чаек из Unsplash, Pexels и iNaturalist.\n"
         "Нажимай ✅, пиши описание — фото уйдёт в очередь.\n"
         "В 12:00, 18:00 и 00:00 МСК бот публикует сам.\n\n"
         "/check — проверить сейчас\n"
