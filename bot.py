@@ -23,7 +23,7 @@ SEEN_IDS = set()
 POST_STORE = {}
 POST_COUNTER = 0
 
-PUBLISH_HOURS = "9,15,21"
+PUBLISH_HOURS = "5,6,7,8,9,10,11,12,13,13,14,15,16,17,18,19"
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -272,7 +272,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def publish_next(app: Application):
     queue = load_json(QUEUE_FILE)
     if not queue:
-        await app.bot.send_message(ADMIN_ID, "📋 Очередь пуста — нечего публиковать.")
+        if not queue:
         return
 
     post = queue.pop(0)
@@ -350,7 +350,7 @@ def main():
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_feeds, "interval", hours=2, args=[app], start_date="2099-01-01")
-    scheduler.add_job(publish_next, "cron", hour=PUBLISH_HOURS, args=[app])
+    scheduler.add_job(publish_next, "cron", hour=PUBLISH_HOURS, minute=0, args=[app])
     scheduler.start()
 
     print("🐦 Seagull Bot запущен!")
