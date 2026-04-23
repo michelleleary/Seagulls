@@ -19,11 +19,13 @@ UNSPLASH_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
 PEXELS_KEY = os.environ["PEXELS_API_KEY"]
 
 QUEUE_FILE = "/tmp/queue.json"
+PENDING_FILE = "/tmp/pending.json"  # хранит ожидающий пост между сообщениями
+
 SEEN_IDS = set()
 POST_STORE = {}
 POST_COUNTER = 0
 
-# Публикация каждый час с 8 до 22 МСК (UTC+3 = 5-19 UTC)
+# Публикация каждый час с 8 до 22 МСК (5-19 UTC)
 PUBLISH_HOURS = "5,6,7,8,9,10,11,12,13,14,15,16,17,18,19"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -41,6 +43,22 @@ def save_json(path, data):
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Ошибка сохранения {path}: {e}")
+
+def load_pending():
+    try:
+        with open(PENDING_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def save_pending(data):
+    save_json(PENDING_FILE, data)
+
+def clear_pending():
+    try:
+        os.remove(PENDING_FILE)
+    except Exception:
+        pass
 
 
 async def fetch_unsplash():
@@ -205,10 +223,81 @@ async def check_feeds(app: Application):
         await app.bot.send_message(ADMIN_ID, f"✅ Отправлено карточек: {total_new}")
 
 
+async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    parts = query.data.split("|", 1)
+    action = parts[0]
+    post_key = parts[1] if len(parts) > 1 else ""
+
+    if action == "s":
+        try:
+            await query.edit_message_caption("❌ Пропущено")
+        except Exception:
+            pass
+
+    elif action == "q":
+        # Ищем пост сначала в памяти, потом в хранилище
+        post = POST_STORE.get(post_key)
+
+        # Если пост не в памяти (после рестарта) — сохраняем хотя бы ключ
+        if not post:
+            post = {"link": "", "media": "", "media_type": "photo", "source": ""}
+
+        # Сохраняем pending в файл — переживёт рестарт
+        save_pending(post)
+
+        prompt = (
+            f"✏️ <b>Напиши описание для публикации в канал</b>\n"
+            f"Отправь следующим сообщением."
+        )
+        if post.get("link"):
+            prompt += f'\n\n<a href="{post["link"]}">Оригинал ({post.get("source", "")})</a>'
+
+        try:
+            await query.edit_message_caption(prompt, parse_mode="HTML", reply_markup=None)
+        except Exception:
+            try:
+                await query.edit_message_text(prompt, parse_mode="HTML", reply_markup=None)
+            except Exception:
+                pass
+
+
+async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    # Загружаем pending из файла — работает даже после рестарта
+    pending = load_pending()
+
+    if not pending:
+        await update.message.reply_text(
+            "ℹ️ Нажми ✅ под карточкой поста, потом пиши описание."
+        )
+        return
+
+    queue = load_json(QUEUE_FILE)
+    queue.append({
+        "caption": update.message.text,
+        "link": pending.get("link", ""),
+        "media": pending.get("media", ""),
+        "media_type": pending.get("media_type", "photo"),
+        "added": datetime.now().isoformat(),
+    })
+    save_json(QUEUE_FILE, queue)
+    clear_pending()
+
+    await update.message.reply_text(
+        f"✅ Добавлено в очередь!\n📋 Постов в очереди: <b>{len(queue)}</b>",
+        parse_mode="HTML"
+    )
+
+
 async def publish_next(app: Application):
     queue = load_json(QUEUE_FILE)
     if not queue:
-        return  # молча пропускаем если очередь пуста
+        return
 
     post = queue.pop(0)
     save_json(QUEUE_FILE, queue)
@@ -230,62 +319,6 @@ async def publish_next(app: Application):
         )
     except Exception as e:
         await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка публикации: {e}")
-
-
-async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    parts = query.data.split("|", 1)
-    action = parts[0]
-    post_key = parts[1] if len(parts) > 1 else ""
-
-    if action == "s":
-        try:
-            await query.edit_message_caption("❌ Пропущено")
-        except Exception:
-            pass
-
-    elif action == "q":
-        post = POST_STORE.get(post_key, {})
-        ctx.user_data["pending"] = post
-        prompt = (
-            f"✏️ <b>Напиши описание для публикации в канал</b>\n"
-            f"Отправь следующим сообщением.\n\n"
-            f'<a href="{post.get("link", "")}">Оригинал ({post.get("source", "")})</a>'
-        )
-        try:
-            await query.edit_message_caption(prompt, parse_mode="HTML", reply_markup=None)
-        except Exception:
-            pass
-
-
-async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    pending = ctx.user_data.get("pending")
-    if not pending:
-        await update.message.reply_text(
-            "ℹ️ Нажми ✅ под карточкой поста, потом пиши описание."
-        )
-        return
-
-    queue = load_json(QUEUE_FILE)
-    queue.append({
-        "caption": update.message.text,
-        "link": pending.get("link", ""),
-        "media": pending.get("media", ""),
-        "media_type": pending.get("media_type", "photo"),
-        "added": datetime.now().isoformat(),
-    })
-    save_json(QUEUE_FILE, queue)
-    ctx.user_data["pending"] = None
-
-    await update.message.reply_text(
-        f"✅ Добавлено в очередь!\n📋 Постов в очереди: <b>{len(queue)}</b>",
-        parse_mode="HTML"
-    )
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -340,9 +373,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     scheduler = AsyncIOScheduler()
-    # Проверка новых фото каждые 2 часа
     scheduler.add_job(check_feeds, "interval", hours=2, args=[app], start_date="2099-01-01")
-    # Публикация каждый час с 8 до 22 МСК (5-19 UTC)
     scheduler.add_job(publish_next, "cron", hour=PUBLISH_HOURS, minute=0, args=[app])
     scheduler.start()
 
