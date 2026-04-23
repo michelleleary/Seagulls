@@ -1,7 +1,7 @@
 import os
 import json
-import re
-import feedparser
+import asyncio
+import aiohttp
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -15,6 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_CHAT_ID"])
 CHANNEL_ID = os.environ["CHANNEL_ID"]
+UNSPLASH_KEY = os.environ["UNSPLASH_ACCESS_KEY"]
 
 QUEUE_FILE = "/tmp/queue.json"
 
@@ -22,14 +23,11 @@ SEEN_IDS = set()
 POST_STORE = {}
 POST_COUNTER = 0
 
-# ─── Фиды ─────────────────────────────────────────────────────────────────────
+# ─── Поисковые запросы Unsplash ───────────────────────────────────────────────
 
-FEEDS = [
-    "https://www.reddit.com/search/?q=seagull&type=posts&sort=new.rss",
-]
+QUERIES = ["seagull", "seagull flying", "seagull beach", "gull bird"]
 
 PUBLISH_HOURS = "9,15,21"
-HEADERS = {"User-Agent": "SeagullBot/1.0 (telegram channel aggregator)"}
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -47,92 +45,66 @@ def save_json(path, data):
     except Exception as e:
         print(f"Ошибка сохранения {path}: {e}")
 
-def extract_media(entry):
-    """Вытаскиваем фото или видео из RSS-записи."""
-    media_url = None
-    media_type = None
 
-    # 1. media_content (стандартный тег)
-    media_content = entry.get("media_content", [])
-    for m in media_content:
-        url = m.get("url", "")
-        mtype = m.get("medium", "") or m.get("type", "")
-        if "video" in mtype or url.endswith((".mp4", ".gifv", ".gif")):
-            return url, "video"
-        if "image" in mtype or url.endswith((".jpg", ".jpeg", ".png", ".webp")):
-            return url, "photo"
+async def fetch_unsplash(query: str, page: int = 1):
+    """Запрашиваем фото из Unsplash."""
+    url = "https://api.unsplash.com/search/photos"
+    params = {
+        "query": query,
+        "per_page": 10,
+        "page": page,
+        "order_by": "latest",
+    }
+    headers = {"Authorization": f"Client-ID {UNSPLASH_KEY}"}
 
-    # 2. Ищем в summary/content
-    content = entry.get("summary", "") or ""
-    
-    # Видео (gifv Reddit конвертируем в mp4)
-    video_match = re.search(r'https?://[^\s"\'<>]+\.(?:mp4|gifv)', content)
-    if video_match:
-        url = video_match.group(0).replace(".gifv", ".mp4")
-        return url, "video"
-
-    # Фото
-    img_match = re.search(r'https?://[^\s"\'<>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\s"\'<>]*)?', content)
-    if img_match:
-        return img_match.group(0), "photo"
-
-    # 3. Ищем i.redd.it напрямую
-    reddit_img = re.search(r'https://i\.redd\.it/[^\s"\'<>]+', content)
-    if reddit_img:
-        return reddit_img.group(0), "photo"
-
-    return None, None
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params, headers=headers) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise Exception(f"Unsplash вернул {resp.status}: {text[:200]}")
+            data = await resp.json()
+            return data.get("results", [])
 
 
 async def check_feeds(app: Application):
     global SEEN_IDS, POST_STORE, POST_COUNTER
     total_new = 0
 
-    for feed_url in FEEDS:
+    for query in QUERIES:
         try:
-            feed = feedparser.parse(feed_url, request_headers=HEADERS)
-            entries = feed.entries
+            photos = await fetch_unsplash(query)
         except Exception as e:
-            await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка фида:\n{feed_url}\n{e}")
+            await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка Unsplash ({query}):\n{e}")
             continue
 
-        for entry in entries[:10]:
-            entry_id = entry.get("id", entry.get("link", ""))
-            if entry_id in SEEN_IDS:
+        for photo in photos:
+            photo_id = photo.get("id", "")
+            if photo_id in SEEN_IDS:
                 continue
-            SEEN_IDS.add(entry_id)
+            SEEN_IDS.add(photo_id)
 
-            title = (entry.get("title") or "без названия")[:200]
-            post_link = entry.get("link", "")
-            author = entry.get("author", "").replace("/u/", "").replace("u/", "") or "unknown"
-
-            # Источник
-            source = "Reddit"
-            if "/r/" in post_link:
-                parts = post_link.split("/r/")
-                if len(parts) > 1:
-                    source = "r/" + parts[1].split("/")[0]
-
-            # Медиа
-            media_url, media_type = extract_media(entry)
+            # Данные фото
+            img_url = photo.get("urls", {}).get("regular", "")
+            author = photo.get("user", {}).get("name", "unknown")
+            author_link = photo.get("user", {}).get("links", {}).get("html", "")
+            description = photo.get("description") or photo.get("alt_description") or "seagull"
+            photo_link = photo.get("links", {}).get("html", "")
 
             # Сохраняем в хранилище
             POST_COUNTER += 1
             post_key = str(POST_COUNTER)
             POST_STORE[post_key] = {
-                "link": post_link,
-                "media": media_url or "",
-                "media_type": media_type or "",
-                "title": title,
+                "link": photo_link,
+                "media": img_url,
+                "media_type": "photo",
                 "author": author,
-                "source": source,
             }
 
             caption = (
-                f"🐦 <b>{source}</b>\n"
-                f"📝 {title}\n"
-                f"👤 u/{author}\n\n"
-                f'<a href="{post_link}">👉 Оригинал</a>'
+                f"🐦 <b>Unsplash — {query}</b>\n"
+                f"📝 {description[:150]}\n"
+                f'👤 <a href="{author_link}">{author}</a>\n\n'
+                f'<a href="{photo_link}">👉 Оригинал</a>'
             )
 
             keyboard = InlineKeyboardMarkup([[
@@ -141,41 +113,30 @@ async def check_feeds(app: Application):
             ]])
 
             try:
-                if media_url and media_type == "photo":
-                    await app.bot.send_photo(
-                        ADMIN_ID, media_url,
-                        caption=caption, parse_mode="HTML",
-                        reply_markup=keyboard
-                    )
-                elif media_url and media_type == "video":
-                    await app.bot.send_video(
-                        ADMIN_ID, media_url,
-                        caption=caption, parse_mode="HTML",
-                        reply_markup=keyboard
-                    )
-                else:
+                await app.bot.send_photo(
+                    ADMIN_ID, img_url,
+                    caption=caption, parse_mode="HTML",
+                    reply_markup=keyboard
+                )
+                total_new += 1
+            except Exception as e:
+                print(f"Ошибка отправки фото: {e}")
+                try:
                     await app.bot.send_message(
                         ADMIN_ID, caption,
                         parse_mode="HTML",
                         reply_markup=keyboard,
-                        disable_web_page_preview=True
-                    )
-                total_new += 1
-            except Exception as e:
-                # Если медиа не загрузилось — шлём текстом
-                try:
-                    await app.bot.send_message(
-                        ADMIN_ID, caption + "\n\n⚠️ медиа не загрузилось",
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
-                        disable_web_page_preview=True
+                        disable_web_page_preview=False
                     )
                     total_new += 1
                 except Exception as e2:
-                    print(f"Ошибка отправки: {e2}")
+                    print(f"Ошибка запасной отправки: {e2}")
+
+            # Небольшая пауза чтобы не спамить
+            await asyncio.sleep(0.5)
 
     if total_new == 0:
-        await app.bot.send_message(ADMIN_ID, "ℹ️ Новых постов не найдено.")
+        await app.bot.send_message(ADMIN_ID, "ℹ️ Новых фото не найдено.")
     else:
         await app.bot.send_message(ADMIN_ID, f"✅ Отправлено карточек: {total_new}")
 
@@ -190,10 +151,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "s":
         try:
-            if query.message.photo or query.message.video:
-                await query.edit_message_caption("❌ Пропущено")
-            else:
-                await query.edit_message_text("❌ Пропущено")
+            await query.edit_message_caption("❌ Пропущено")
         except Exception:
             pass
 
@@ -203,13 +161,10 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         prompt = (
             f"✏️ <b>Напиши описание для публикации в канал</b>\n"
             f"Отправь следующим сообщением.\n\n"
-            f'<a href="{post.get("link", "")}">Оригинал на Reddit</a>'
+            f'<a href="{post.get("link", "")}">Оригинал на Unsplash</a>'
         )
         try:
-            if query.message.photo or query.message.video:
-                await query.edit_message_caption(prompt, parse_mode="HTML", reply_markup=None)
-            else:
-                await query.edit_message_text(prompt, parse_mode="HTML", reply_markup=None)
+            await query.edit_message_caption(prompt, parse_mode="HTML", reply_markup=None)
         except Exception:
             pass
 
@@ -230,7 +185,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "caption": update.message.text,
         "link": pending.get("link", ""),
         "media": pending.get("media", ""),
-        "media_type": pending.get("media_type", ""),
+        "media_type": pending.get("media_type", "photo"),
         "added": datetime.now().isoformat(),
     })
     save_json(QUEUE_FILE, queue)
@@ -253,16 +208,12 @@ async def publish_next(app: Application):
 
     caption = post["caption"]
     if post.get("link"):
-        caption += f'\n\n<a href="{post["link"]}">Источник</a>'
+        caption += f'\n\n<a href="{post["link"]}">Фото: Unsplash</a>'
 
     try:
         media = post.get("media", "")
-        media_type = post.get("media_type", "")
-
-        if media and media_type == "photo":
+        if media:
             await app.bot.send_photo(CHANNEL_ID, media, caption=caption, parse_mode="HTML")
-        elif media and media_type == "video":
-            await app.bot.send_video(CHANNEL_ID, media, caption=caption, parse_mode="HTML")
         else:
             await app.bot.send_message(CHANNEL_ID, caption, parse_mode="HTML", disable_web_page_preview=True)
 
@@ -278,8 +229,8 @@ async def publish_next(app: Application):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐦 <b>Seagull Bot запущен!</b>\n\n"
-        "Каждые 2 часа я буду присылать посты из Reddit.\n"
-        "Нажимай ✅, пиши описание — пост уйдёт в очередь.\n"
+        "Каждые 2 часа я буду присылать фото чаек с Unsplash.\n"
+        "Нажимай ✅, пиши описание — фото уйдёт в очередь.\n"
         "В 12:00, 18:00 и 00:00 МСК бот публикует сам.\n\n"
         "/check — проверить сейчас\n"
         "/status — очередь\n"
@@ -306,7 +257,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_check(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    await update.message.reply_text("🔍 Проверяю фиды…")
+    await update.message.reply_text("🔍 Ищу фото чаек…")
     await check_feeds(ctx.application)
 
 
