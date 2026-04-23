@@ -16,10 +16,12 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_CHAT_ID"])
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 
-QUEUE_FILE = os.environ.get("QUEUE_FILE", "queue.json")
-SEEN_FILE = os.environ.get("SEEN_FILE", "seen.json")
+QUEUE_FILE = "/tmp/queue.json"
 
-# ─── Фиды (тестовые — BBC точно работает) ────────────────────────────────────
+# seen хранится только в памяти — при рестарте сбрасывается, это нормально
+SEEN_IDS = set()
+
+# ─── Фиды ─────────────────────────────────────────────────────────────────────
 
 FEEDS = [
     "https://feeds.bbci.co.uk/news/rss.xml",
@@ -42,12 +44,15 @@ def load_json(path):
         return []
 
 def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Ошибка сохранения {path}: {e}")
 
 
 async def check_feeds(app: Application):
-    seen = load_json(SEEN_FILE)
+    global SEEN_IDS
     total_new = 0
 
     for feed_url in FEEDS:
@@ -59,19 +64,14 @@ async def check_feeds(app: Application):
             await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка фида:\n{feed_url}\n{e}")
             continue
 
-        # Отладочное сообщение — сколько записей получено
-        await app.bot.send_message(
-            ADMIN_ID,
-            f"📡 Фид: {feed_url}\nЗаписей получено: {len(entries)}"
-        )
-
-        for entry in entries[:5]:
+        new_in_feed = 0
+        for entry in entries[:10]:
             entry_id = entry.get("id", entry.get("link", ""))
-            if entry_id in seen:
+            if entry_id in SEEN_IDS:
                 continue
 
-            seen.append(entry_id)
-            save_json(SEEN_FILE, seen[-500:])
+            SEEN_IDS.add(entry_id)
+            new_in_feed += 1
 
             title = (entry.get("title") or "")[:120]
             post_link = entry.get("link", "")
@@ -140,10 +140,15 @@ async def check_feeds(app: Application):
                 except Exception as e2:
                     print(f"Ошибка запасной отправки: {e2}")
 
+        await app.bot.send_message(
+            ADMIN_ID,
+            f"📡 {source if 'bbc' not in feed_url else 'BBC News'}: всего {len(entries)}, новых {new_in_feed}"
+        )
+
     if total_new == 0:
         await app.bot.send_message(ADMIN_ID, "ℹ️ Новых постов не найдено.")
     else:
-        await app.bot.send_message(ADMIN_ID, f"✅ Найдено новых постов: {total_new}")
+        await app.bot.send_message(ADMIN_ID, f"✅ Отправлено карточек: {total_new}")
 
 
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -275,11 +280,6 @@ async def cmd_publish(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     await publish_next(ctx.application)
 
-async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    save_json(SEEN_FILE, [])
-    await update.message.reply_text("🗑️ seen.json очищен! Теперь отправь /check")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -288,7 +288,6 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("check", cmd_check))
     app.add_handler(CommandHandler("publish", cmd_publish))
-    app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
