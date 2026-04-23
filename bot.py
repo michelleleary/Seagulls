@@ -21,7 +21,7 @@ SEEN_FILE = "seen.json"
 # ─── RSS-фиды Reddit (без API, без ключей) ───────────────────────────────────
 
 FEEDS = [
-    "https://www.reddit.com/search.rss?q=seagull&sort=new&limit=10",
+    "https://www.reddit.com/search.rss?q=new&sort=new&limit=10",
     "https://www.reddit.com/search.rss?q=seagull+photo&sort=new&limit=10",
     "https://www.reddit.com/r/whatsthisbird/search.rss?q=seagull&sort=new&limit=10",
 ]
