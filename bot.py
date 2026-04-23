@@ -21,6 +21,10 @@ QUEUE_FILE = "/tmp/queue.json"
 # seen хранится только в памяти
 SEEN_IDS = set()
 
+# Хранилище постов по короткому ключу (чтобы не пихать URL в кнопки)
+POST_STORE = {}
+POST_COUNTER = 0
+
 # ─── Фиды ─────────────────────────────────────────────────────────────────────
 
 FEEDS = [
@@ -52,7 +56,7 @@ def save_json(path, data):
 
 
 async def check_feeds(app: Application):
-    global SEEN_IDS
+    global SEEN_IDS, POST_STORE, POST_COUNTER
     total_new = 0
 
     for feed_url in FEEDS:
@@ -83,6 +87,11 @@ async def check_feeds(app: Application):
             elif "bbc" in feed_url:
                 source = "BBC News"
 
+            # Сохраняем пост в хранилище, в кнопку кладём только короткий ключ
+            POST_COUNTER += 1
+            post_key = str(POST_COUNTER)
+            POST_STORE[post_key] = {"link": post_link, "media": ""}
+
             caption = (
                 f"📰 <b>{source}</b>\n"
                 f"{title}\n\n"
@@ -90,17 +99,9 @@ async def check_feeds(app: Application):
                 f"<i>Напиши описание и нажми ✅, или пропусти.</i>"
             )
 
-            short_id = entry_id[-60:] if len(entry_id) > 60 else entry_id
-
             keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "✅ В очередь",
-                    callback_data=f"queue|{short_id}|{post_link}|"
-                ),
-                InlineKeyboardButton(
-                    "❌ Пропустить",
-                    callback_data=f"skip|{short_id}"
-                ),
+                InlineKeyboardButton("✅ В очередь", callback_data=f"q|{post_key}"),
+                InlineKeyboardButton("❌ Пропустить", callback_data=f"s|{post_key}"),
             ]])
 
             try:
@@ -124,21 +125,26 @@ async def check_feeds(app: Application):
 async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    parts = query.data.split("|", 3)
-    action = parts[0]
 
-    if action == "skip":
+    parts = query.data.split("|", 1)
+    action = parts[0]
+    post_key = parts[1] if len(parts) > 1 else ""
+
+    if action == "s":
         try:
             await query.edit_message_text("❌ Пропущено")
         except Exception:
             pass
 
-    elif action == "queue":
-        _, post_id, link, media = parts
-        ctx.user_data["pending"] = {"id": post_id, "link": link, "media": media}
+    elif action == "q":
+        post = POST_STORE.get(post_key, {})
+        ctx.user_data["pending"] = {
+            "link": post.get("link", ""),
+            "media": post.get("media", "")
+        }
         prompt = (
             f"✏️ <b>Напиши описание для этого поста</b> — отправь следующим сообщением.\n"
-            f'<a href="{link}">Оригинал</a>'
+            f'<a href="{post.get("link", "")}">Оригинал</a>'
         )
         try:
             await query.edit_message_text(prompt, parse_mode="HTML")
@@ -186,9 +192,7 @@ async def publish_next(app: Application):
         caption += f'\n\n<a href="{post["link"]}">Источник</a>'
 
     try:
-        await app.bot.send_message(
-            CHANNEL_ID, caption, parse_mode="HTML"
-        )
+        await app.bot.send_message(CHANNEL_ID, caption, parse_mode="HTML")
         await app.bot.send_message(
             ADMIN_ID,
             f"📤 Опубликовано в канал!\n📋 Осталось в очереди: <b>{len(queue)}</b>",
@@ -249,7 +253,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     scheduler = AsyncIOScheduler()
-    # Проверка фидов каждые 2 часа — НЕ сразу при старте
     scheduler.add_job(check_feeds, "interval", hours=2, args=[app], start_date="2099-01-01")
     scheduler.add_job(publish_next, "cron", hour=PUBLISH_HOURS, args=[app])
     scheduler.start()
