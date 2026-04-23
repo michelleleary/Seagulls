@@ -23,7 +23,7 @@ SEEN_FILE = os.environ.get("SEEN_FILE", "seen.json")
 
 FEEDS = [
     "https://feeds.bbci.co.uk/news/rss.xml",
-    "https://www.reddit.com/r/AskReddit/new.rss",
+    "https://old.reddit.com/r/seagulls/new.rss",
 ]
 
 # ─── Время публикации (UTC, +3 = МСК) ────────────────────────────────────────
