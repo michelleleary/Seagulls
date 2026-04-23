@@ -18,7 +18,7 @@ CHANNEL_ID = os.environ["CHANNEL_ID"]
 
 QUEUE_FILE = "/tmp/queue.json"
 
-# seen хранится только в памяти — при рестарте сбрасывается, это нормально
+# seen хранится только в памяти
 SEEN_IDS = set()
 
 # ─── Фиды ─────────────────────────────────────────────────────────────────────
@@ -64,25 +64,15 @@ async def check_feeds(app: Application):
             await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка фида:\n{feed_url}\n{e}")
             continue
 
-        new_in_feed = 0
         for entry in entries[:10]:
             entry_id = entry.get("id", entry.get("link", ""))
             if entry_id in SEEN_IDS:
                 continue
 
             SEEN_IDS.add(entry_id)
-            new_in_feed += 1
 
             title = (entry.get("title") or "")[:120]
             post_link = entry.get("link", "")
-
-            # Пробуем вытащить картинку
-            media_url = None
-            content = entry.get("summary", "")
-            if content:
-                img_match = re.search(r'https?://[^\s"\'<>]+\.(?:jpg|jpeg|png|gif|webp)', content)
-                if img_match:
-                    media_url = img_match.group(0)
 
             # Определяем источник
             source = "Новости"
@@ -105,7 +95,7 @@ async def check_feeds(app: Application):
             keyboard = InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     "✅ В очередь",
-                    callback_data=f"queue|{short_id}|{post_link}|{media_url or ''}"
+                    callback_data=f"queue|{short_id}|{post_link}|"
                 ),
                 InlineKeyboardButton(
                     "❌ Пропустить",
@@ -114,32 +104,16 @@ async def check_feeds(app: Application):
             ]])
 
             try:
-                if False:  # картинки временно отключены
-                    pass
-                else:
-                    await app.bot.send_message(
-                        ADMIN_ID, caption,
-                        parse_mode="HTML",
-                        reply_markup=keyboard,
-                        disable_web_page_preview=False
-                    )
+                await app.bot.send_message(
+                    ADMIN_ID, caption,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                    disable_web_page_preview=True
+                )
                 total_new += 1
             except Exception as e:
                 print(f"Ошибка отправки карточки: {e}")
-                try:
-                    await app.bot.send_message(
-                        ADMIN_ID, caption,
-                        parse_mode="HTML",
-                        reply_markup=keyboard
-                    )
-                    total_new += 1
-                except Exception as e2:
-                    print(f"Ошибка запасной отправки: {e2}")
-
-        await app.bot.send_message(
-            ADMIN_ID,
-            f"📡 {source if 'bbc' not in feed_url else 'BBC News'}: всего {len(entries)}, новых {new_in_feed}"
-        )
+                await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка карточки: {e}")
 
     if total_new == 0:
         await app.bot.send_message(ADMIN_ID, "ℹ️ Новых постов не найдено.")
@@ -154,12 +128,8 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     action = parts[0]
 
     if action == "skip":
-        text = "❌ Пропущено"
         try:
-            if query.message.photo:
-                await query.edit_message_caption(text)
-            else:
-                await query.edit_message_text(text)
+            await query.edit_message_text("❌ Пропущено")
         except Exception:
             pass
 
@@ -171,10 +141,7 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f'<a href="{link}">Оригинал</a>'
         )
         try:
-            if query.message.photo:
-                await query.edit_message_caption(prompt, parse_mode="HTML", reply_markup=None)
-            else:
-                await query.edit_message_text(prompt, parse_mode="HTML")
+            await query.edit_message_text(prompt, parse_mode="HTML")
         except Exception:
             pass
 
@@ -219,15 +186,9 @@ async def publish_next(app: Application):
         caption += f'\n\n<a href="{post["link"]}">Источник</a>'
 
     try:
-        if post.get("media"):
-            await app.bot.send_photo(
-                CHANNEL_ID, post["media"],
-                caption=caption, parse_mode="HTML"
-            )
-        else:
-            await app.bot.send_message(
-                CHANNEL_ID, caption, parse_mode="HTML"
-            )
+        await app.bot.send_message(
+            CHANNEL_ID, caption, parse_mode="HTML"
+        )
         await app.bot.send_message(
             ADMIN_ID,
             f"📤 Опубликовано в канал!\n📋 Осталось в очереди: <b>{len(queue)}</b>",
@@ -288,7 +249,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_feeds, "interval", hours=2, args=[app])
+    # Проверка фидов каждые 2 часа — НЕ сразу при старте
+    scheduler.add_job(check_feeds, "interval", hours=2, args=[app], start_date="2099-01-01")
     scheduler.add_job(publish_next, "cron", hour=PUBLISH_HOURS, args=[app])
     scheduler.start()
 
