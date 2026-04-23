@@ -58,7 +58,8 @@ async def check_feeds(app: Application):
             await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка фида:\n{e}")
             continue
 
-        print(f"Фид: {feed_url} — записей: {len(entries)}")
+print(f"Фид: {feed_url} — записей: {len(entries)}")
+await app.bot.send_message(ADMIN_ID, f"📡 Фид: {feed_url}\nЗаписей получено: {len(entries)}")
 
         for entry in entries[:5]:
             entry_id = entry.get("id", entry.get("link", ""))
