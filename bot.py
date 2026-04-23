@@ -18,24 +18,18 @@ CHANNEL_ID = os.environ["CHANNEL_ID"]
 
 QUEUE_FILE = "/tmp/queue.json"
 
-# seen хранится только в памяти
 SEEN_IDS = set()
-
-# Хранилище постов по короткому ключу (чтобы не пихать URL в кнопки)
 POST_STORE = {}
 POST_COUNTER = 0
 
 # ─── Фиды ─────────────────────────────────────────────────────────────────────
 
 FEEDS = [
-    "https://feeds.bbci.co.uk/news/rss.xml",
     "https://old.reddit.com/r/seagulls/new.rss",
+    "https://old.reddit.com/r/birding/search.rss?q=seagull&sort=new",
 ]
 
-# ─── Время публикации (UTC, +3 = МСК) ────────────────────────────────────────
-
 PUBLISH_HOURS = "9,15,21"
-
 HEADERS = {"User-Agent": "SeagullBot/1.0 (telegram channel aggregator)"}
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -54,6 +48,42 @@ def save_json(path, data):
     except Exception as e:
         print(f"Ошибка сохранения {path}: {e}")
 
+def extract_media(entry):
+    """Вытаскиваем фото или видео из RSS-записи."""
+    media_url = None
+    media_type = None
+
+    # 1. media_content (стандартный тег)
+    media_content = entry.get("media_content", [])
+    for m in media_content:
+        url = m.get("url", "")
+        mtype = m.get("medium", "") or m.get("type", "")
+        if "video" in mtype or url.endswith((".mp4", ".gifv", ".gif")):
+            return url, "video"
+        if "image" in mtype or url.endswith((".jpg", ".jpeg", ".png", ".webp")):
+            return url, "photo"
+
+    # 2. Ищем в summary/content
+    content = entry.get("summary", "") or ""
+    
+    # Видео (gifv Reddit конвертируем в mp4)
+    video_match = re.search(r'https?://[^\s"\'<>]+\.(?:mp4|gifv)', content)
+    if video_match:
+        url = video_match.group(0).replace(".gifv", ".mp4")
+        return url, "video"
+
+    # Фото
+    img_match = re.search(r'https?://[^\s"\'<>]+\.(?:jpg|jpeg|png|webp)(?:\?[^\s"\'<>]*)?', content)
+    if img_match:
+        return img_match.group(0), "photo"
+
+    # 3. Ищем i.redd.it напрямую
+    reddit_img = re.search(r'https://i\.redd\.it/[^\s"\'<>]+', content)
+    if reddit_img:
+        return reddit_img.group(0), "photo"
+
+    return None, None
+
 
 async def check_feeds(app: Application):
     global SEEN_IDS, POST_STORE, POST_COUNTER
@@ -64,7 +94,6 @@ async def check_feeds(app: Application):
             feed = feedparser.parse(feed_url, request_headers=HEADERS)
             entries = feed.entries
         except Exception as e:
-            print(f"Ошибка фида {feed_url}: {e}")
             await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка фида:\n{feed_url}\n{e}")
             continue
 
@@ -72,31 +101,39 @@ async def check_feeds(app: Application):
             entry_id = entry.get("id", entry.get("link", ""))
             if entry_id in SEEN_IDS:
                 continue
-
             SEEN_IDS.add(entry_id)
 
-            title = (entry.get("title") or "")[:120]
+            title = (entry.get("title") or "без названия")[:200]
             post_link = entry.get("link", "")
+            author = entry.get("author", "").replace("/u/", "").replace("u/", "") or "unknown"
 
-            # Определяем источник
-            source = "Новости"
+            # Источник
+            source = "Reddit"
             if "/r/" in post_link:
                 parts = post_link.split("/r/")
                 if len(parts) > 1:
                     source = "r/" + parts[1].split("/")[0]
-            elif "bbc" in feed_url:
-                source = "BBC News"
 
-            # Сохраняем пост в хранилище, в кнопку кладём только короткий ключ
+            # Медиа
+            media_url, media_type = extract_media(entry)
+
+            # Сохраняем в хранилище
             POST_COUNTER += 1
             post_key = str(POST_COUNTER)
-            POST_STORE[post_key] = {"link": post_link, "media": ""}
+            POST_STORE[post_key] = {
+                "link": post_link,
+                "media": media_url or "",
+                "media_type": media_type or "",
+                "title": title,
+                "author": author,
+                "source": source,
+            }
 
             caption = (
-                f"📰 <b>{source}</b>\n"
-                f"{title}\n\n"
-                f'<a href="{post_link}">👉 Открыть оригинал</a>\n\n'
-                f"<i>Напиши описание и нажми ✅, или пропусти.</i>"
+                f"🐦 <b>{source}</b>\n"
+                f"📝 {title}\n"
+                f"👤 u/{author}\n\n"
+                f'<a href="{post_link}">👉 Оригинал</a>'
             )
 
             keyboard = InlineKeyboardMarkup([[
@@ -105,16 +142,38 @@ async def check_feeds(app: Application):
             ]])
 
             try:
-                await app.bot.send_message(
-                    ADMIN_ID, caption,
-                    parse_mode="HTML",
-                    reply_markup=keyboard,
-                    disable_web_page_preview=True
-                )
+                if media_url and media_type == "photo":
+                    await app.bot.send_photo(
+                        ADMIN_ID, media_url,
+                        caption=caption, parse_mode="HTML",
+                        reply_markup=keyboard
+                    )
+                elif media_url and media_type == "video":
+                    await app.bot.send_video(
+                        ADMIN_ID, media_url,
+                        caption=caption, parse_mode="HTML",
+                        reply_markup=keyboard
+                    )
+                else:
+                    await app.bot.send_message(
+                        ADMIN_ID, caption,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                        disable_web_page_preview=True
+                    )
                 total_new += 1
             except Exception as e:
-                print(f"Ошибка отправки карточки: {e}")
-                await app.bot.send_message(ADMIN_ID, f"⚠️ Ошибка карточки: {e}")
+                # Если медиа не загрузилось — шлём текстом
+                try:
+                    await app.bot.send_message(
+                        ADMIN_ID, caption + "\n\n⚠️ медиа не загрузилось",
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                        disable_web_page_preview=True
+                    )
+                    total_new += 1
+                except Exception as e2:
+                    print(f"Ошибка отправки: {e2}")
 
     if total_new == 0:
         await app.bot.send_message(ADMIN_ID, "ℹ️ Новых постов не найдено.")
@@ -132,22 +191,26 @@ async def button_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "s":
         try:
-            await query.edit_message_text("❌ Пропущено")
+            if query.message.photo or query.message.video:
+                await query.edit_message_caption("❌ Пропущено")
+            else:
+                await query.edit_message_text("❌ Пропущено")
         except Exception:
             pass
 
     elif action == "q":
         post = POST_STORE.get(post_key, {})
-        ctx.user_data["pending"] = {
-            "link": post.get("link", ""),
-            "media": post.get("media", "")
-        }
+        ctx.user_data["pending"] = post
         prompt = (
-            f"✏️ <b>Напиши описание для этого поста</b> — отправь следующим сообщением.\n"
-            f'<a href="{post.get("link", "")}">Оригинал</a>'
+            f"✏️ <b>Напиши описание для публикации в канал</b>\n"
+            f"Отправь следующим сообщением.\n\n"
+            f'<a href="{post.get("link", "")}">Оригинал на Reddit</a>'
         )
         try:
-            await query.edit_message_text(prompt, parse_mode="HTML")
+            if query.message.photo or query.message.video:
+                await query.edit_message_caption(prompt, parse_mode="HTML", reply_markup=None)
+            else:
+                await query.edit_message_text(prompt, parse_mode="HTML", reply_markup=None)
         except Exception:
             pass
 
@@ -166,8 +229,9 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     queue = load_json(QUEUE_FILE)
     queue.append({
         "caption": update.message.text,
-        "link": pending["link"],
-        "media": pending["media"],
+        "link": pending.get("link", ""),
+        "media": pending.get("media", ""),
+        "media_type": pending.get("media_type", ""),
         "added": datetime.now().isoformat(),
     })
     save_json(QUEUE_FILE, queue)
@@ -182,6 +246,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def publish_next(app: Application):
     queue = load_json(QUEUE_FILE)
     if not queue:
+        await app.bot.send_message(ADMIN_ID, "📋 Очередь пуста — нечего публиковать.")
         return
 
     post = queue.pop(0)
@@ -192,10 +257,19 @@ async def publish_next(app: Application):
         caption += f'\n\n<a href="{post["link"]}">Источник</a>'
 
     try:
-        await app.bot.send_message(CHANNEL_ID, caption, parse_mode="HTML")
+        media = post.get("media", "")
+        media_type = post.get("media_type", "")
+
+        if media and media_type == "photo":
+            await app.bot.send_photo(CHANNEL_ID, media, caption=caption, parse_mode="HTML")
+        elif media and media_type == "video":
+            await app.bot.send_video(CHANNEL_ID, media, caption=caption, parse_mode="HTML")
+        else:
+            await app.bot.send_message(CHANNEL_ID, caption, parse_mode="HTML", disable_web_page_preview=True)
+
         await app.bot.send_message(
             ADMIN_ID,
-            f"📤 Опубликовано в канал!\n📋 Осталось в очереди: <b>{len(queue)}</b>",
+            f"📤 Опубликовано!\n📋 Осталось в очереди: <b>{len(queue)}</b>",
             parse_mode="HTML"
         )
     except Exception as e:
@@ -205,11 +279,12 @@ async def publish_next(app: Application):
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🐦 <b>Seagull Bot запущен!</b>\n\n"
-        "Я буду присылать тебе посты каждые 2 часа.\n"
-        "Нажимай ✅ под понравившимися, пиши описание — пост встанет в очередь.\n\n"
-        "/status — посмотреть очередь\n"
-        "/check — проверить прямо сейчас\n"
-        "/publish — опубликовать следующий пост вручную",
+        "Каждые 2 часа я буду присылать посты из Reddit.\n"
+        "Нажимай ✅, пиши описание — пост уйдёт в очередь.\n"
+        "В 12:00, 18:00 и 00:00 МСК бот публикует сам.\n\n"
+        "/check — проверить сейчас\n"
+        "/status — очередь\n"
+        "/publish — опубликовать вручную",
         parse_mode="HTML"
     )
 
